@@ -142,6 +142,7 @@ const { anticallCommand, readState: readAnticallState } = require('./commands/an
 const { pmblockerCommand, readState: readPmBlockerState } = require('./commands/pmblocker');
 const settingsCommand = require('./commands/settings');
 const soraCommand = require('./commands/sora');
+const { afkCommand, removeAfkCommand, getAfkSticker } = require('./commands/afk');
 
 // Global settings
 global.packname = settings.packname;
@@ -260,15 +261,6 @@ async function handleMessages(sock, messageUpdate, printLog) {
             return;
         }
 
-        /*  // Basic message response in private chat
-          if (!isGroup && (userMessage === 'hi' || userMessage === 'hello' || userMessage === 'bot' || userMessage === 'hlo' || userMessage === 'hey' || userMessage === 'bro')) {
-              await sock.sendMessage(chatId, {
-                  text: 'Hi, How can I help you?\nYou can use .menu for more info and commands.',
-                  ...channelInfo
-              });
-              return;
-          } */
-
         if (!message.key.fromMe) incrementMessageCount(chatId, senderId);
 
         // Check for bad words and antilink FIRST, before ANY other processing
@@ -279,6 +271,29 @@ async function handleMessages(sock, messageUpdate, printLog) {
             }
             // Antilink checks message text internally, so run it even if userMessage is empty
             await Antilink(message, sock);
+        }
+
+        // Check if any user was tagged (for AFK sticker reply)
+        if (isGroup && !message.key.fromMe) {
+            const mentionedJid = message.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+            
+            if (mentionedJid.length > 0) {
+                // Check each mentioned user for a saved sticker
+                for (const taggedUser of mentionedJid) {
+                    const sticker = getAfkSticker(chatId, taggedUser);
+                    if (sticker) {
+                        await sock.sendMessage(chatId, {
+                            sticker: sticker,
+                            contextInfo: {
+                                forwardingScore: 1,
+                                isForwarded: true,
+                                mentionedJid: [taggedUser]
+                            }
+                        });
+                        break; // Only send one sticker per message
+                    }
+                }
+            }
         }
 
         // PM blocker: block non-owner DMs when enabled (do not ban)
@@ -370,6 +385,14 @@ async function handleMessages(sock, messageUpdate, printLog) {
         let commandExecuted = false;
 
         switch (true) {
+            case userMessage === '.afk':
+                await afkCommand(sock, chatId, message);
+                commandExecuted = true;
+                break;
+            case userMessage === '.removeafk':
+                await removeAfkCommand(sock, chatId, message);
+                commandExecuted = true;
+                break;
             case userMessage === '.simage': {
                 const quotedMessage = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
                 if (quotedMessage?.stickerMessage) {
@@ -529,7 +552,7 @@ async function handleMessages(sock, messageUpdate, printLog) {
                 }
                 break;
             case userMessage.startsWith('.tag'):
-                const messageText = rawText.slice(4).trim();  // use rawText here, not userMessage
+                const messageText = rawText.slice(4).trim();
                 const replyMessage = message.message?.extendedTextMessage?.contextInfo?.quotedMessage || null;
                 await tagCommand(sock, chatId, senderId, messageText, replyMessage, message);
                 break;
@@ -694,12 +717,10 @@ async function handleMessages(sock, messageUpdate, printLog) {
                 break;
             case userMessage.startsWith('.welcome'):
                 if (isGroup) {
-                    // Check admin status if not already checked
                     if (!isSenderAdmin) {
                         const adminStatus = await isAdmin(sock, chatId, senderId);
                         isSenderAdmin = adminStatus.isSenderAdmin;
                     }
-
                     if (isSenderAdmin || message.key.fromMe) {
                         await welcomeCommand(sock, chatId, message);
                     } else {
@@ -711,12 +732,10 @@ async function handleMessages(sock, messageUpdate, printLog) {
                 break;
             case userMessage.startsWith('.goodbye'):
                 if (isGroup) {
-                    // Check admin status if not already checked
                     if (!isSenderAdmin) {
                         const adminStatus = await isAdmin(sock, chatId, senderId);
                         isSenderAdmin = adminStatus.isSenderAdmin;
                     }
-
                     if (isSenderAdmin || message.key.fromMe) {
                         await goodbyeCommand(sock, chatId, message);
                     } else {
@@ -738,16 +757,13 @@ async function handleMessages(sock, messageUpdate, printLog) {
                     await sock.sendMessage(chatId, { text: 'This command can only be used in groups.', ...channelInfo }, { quoted: message });
                     return;
                 }
-
                 const adminStatus = await isAdmin(sock, chatId, senderId);
                 isSenderAdmin = adminStatus.isSenderAdmin;
                 isBotAdmin = adminStatus.isBotAdmin;
-
                 if (!isBotAdmin) {
                     await sock.sendMessage(chatId, { text: '*Bot must be admin to use this feature*', ...channelInfo }, { quoted: message });
                     return;
                 }
-
                 await antibadwordCommand(sock, chatId, message, senderId, isSenderAdmin);
                 break;
             case userMessage.startsWith('.chatbot'):
@@ -755,21 +771,18 @@ async function handleMessages(sock, messageUpdate, printLog) {
                     await sock.sendMessage(chatId, { text: 'This command can only be used in groups.', ...channelInfo }, { quoted: message });
                     return;
                 }
-
-                // Check if sender is admin or bot owner
                 const chatbotAdminStatus = await isAdmin(sock, chatId, senderId);
                 if (!chatbotAdminStatus.isSenderAdmin && !message.key.fromMe) {
                     await sock.sendMessage(chatId, { text: '*Only admins or bot owner can use this command*', ...channelInfo }, { quoted: message });
                     return;
                 }
-
                 const match = userMessage.slice(8).trim();
                 await handleChatbotCommand(sock, chatId, message, match);
                 break;
             case userMessage.startsWith('.take') || userMessage.startsWith('.steal'):
                 {
                     const isSteal = userMessage.startsWith('.steal');
-                    const sliceLen = isSteal ? 6 : 5; // '.steal' vs '.take'
+                    const sliceLen = isSteal ? 6 : 5;
                     const takeArgs = rawText.slice(sliceLen).trim().split(' ');
                     await takeCommand(sock, chatId, message, takeArgs);
                 }
@@ -820,7 +833,6 @@ async function handleMessages(sock, messageUpdate, printLog) {
             case userMessage.startsWith('.tg') || userMessage.startsWith('.stickertelegram') || userMessage.startsWith('.tgsticker') || userMessage.startsWith('.telesticker'):
                 await stickerTelegramCommand(sock, chatId, message);
                 break;
-
             case userMessage === '.vv':
                 await viewOnceCommand(sock, chatId, message);
                 break;
@@ -830,9 +842,6 @@ async function handleMessages(sock, messageUpdate, printLog) {
             case userMessage.startsWith('.autostatus'):
                 const autoStatusArgs = userMessage.split(' ').slice(1);
                 await autoStatusCommand(sock, chatId, message, autoStatusArgs);
-                break;
-            case userMessage.startsWith('.simp'):
-                await simpCommand(sock, chatId, message);
                 break;
             case userMessage.startsWith('.metallic'):
                 await textmakerCommand(sock, chatId, message, userMessage, 'metallic');
@@ -893,7 +902,6 @@ async function handleMessages(sock, messageUpdate, printLog) {
                 await handleAntideleteCommand(sock, chatId, message, antideleteMatch);
                 break;
             case userMessage === '.surrender':
-                // Handle surrender command for tictactoe game
                 await handleTicTacToeMove(sock, chatId, senderId, 'surrender');
                 break;
             case userMessage === '.cleartmp':
@@ -1041,7 +1049,6 @@ async function handleMessages(sock, messageUpdate, printLog) {
                     await miscCommand(sock, chatId, message, args);
                 }
                 break;
-
             case userMessage.startsWith('.oogway2'):
             case userMessage.startsWith('.oogway'):
                 {
@@ -1085,7 +1092,6 @@ async function handleMessages(sock, messageUpdate, printLog) {
                     await animeCommand(sock, chatId, message, args);
                 }
                 break;
-            // animu aliases
             case userMessage.startsWith('.nom'):
             case userMessage.startsWith('.poke'):
             case userMessage.startsWith('.cry'):
@@ -1096,7 +1102,6 @@ async function handleMessages(sock, messageUpdate, printLog) {
             case userMessage.startsWith('.facepalm'):
             case userMessage.startsWith('.face-palm'):
             case userMessage.startsWith('.animuquote'):
-            case userMessage.startsWith('.quote'):
             case userMessage.startsWith('.loli'):
                 {
                     const parts = userMessage.trim().split(/\s+/);
@@ -1165,8 +1170,7 @@ async function handleMessages(sock, messageUpdate, printLog) {
                 break;
             default:
                 if (isGroup) {
-                    // Handle non-command group messages
-                    if (userMessage) {  // Make sure there's a message
+                    if (userMessage) {
                         await handleChatbotResponse(sock, chatId, message, userMessage, senderId);
                     }
                     await handleTagDetection(sock, chatId, message, senderId);
@@ -1176,36 +1180,23 @@ async function handleMessages(sock, messageUpdate, printLog) {
                 break;
         }
 
-        // If a command was executed, show typing status after command execution
         if (commandExecuted !== false) {
-            // Command was executed, now show typing status after command execution
             await showTypingAfterCommand(sock, chatId);
         }
 
-        // Function to handle .groupjid command
         async function groupJidCommand(sock, chatId, message) {
             const groupJid = message.key.remoteJid;
-
             if (!groupJid.endsWith('@g.us')) {
-                return await sock.sendMessage(chatId, {
-                    text: "❌ This command can only be used in a group."
-                });
+                return await sock.sendMessage(chatId, { text: "❌ This command can only be used in a group." });
             }
-
-            await sock.sendMessage(chatId, {
-                text: `✅ Group JID: ${groupJid}`
-            }, {
-                quoted: message
-            });
+            await sock.sendMessage(chatId, { text: `✅ Group JID: ${groupJid}` }, { quoted: message });
         }
 
         if (userMessage.startsWith('.')) {
-            // After command is processed successfully
             await addCommandReaction(sock, message);
         }
     } catch (error) {
         console.error('❌ Error in message handler:', error.message);
-        // Only try to send error message if we have a valid chatId
         if (chatId) {
             await sock.sendMessage(chatId, {
                 text: '❌ Failed to process command!',
@@ -1218,39 +1209,25 @@ async function handleMessages(sock, messageUpdate, printLog) {
 async function handleGroupParticipantUpdate(sock, update) {
     try {
         const { id, participants, action, author } = update;
-
-        // Check if it's a group
         if (!id.endsWith('@g.us')) return;
-
-        // Respect bot mode: only announce promote/demote in public mode
         let isPublic = true;
         try {
             const modeData = JSON.parse(fs.readFileSync('./data/messageCount.json'));
             if (typeof modeData.isPublic === 'boolean') isPublic = modeData.isPublic;
-        } catch (e) {
-            // If reading fails, default to public behavior
-        }
-
-        // Handle promotion events
+        } catch (e) {}
         if (action === 'promote') {
             if (!isPublic) return;
             await handlePromotionEvent(sock, id, participants, author);
             return;
         }
-
-        // Handle demotion events
         if (action === 'demote') {
             if (!isPublic) return;
             await handleDemotionEvent(sock, id, participants, author);
             return;
         }
-
-        // Handle join events
         if (action === 'add') {
             await handleJoinEvent(sock, id, participants);
         }
-
-        // Handle leave events
         if (action === 'remove') {
             await handleLeaveEvent(sock, id, participants);
         }
@@ -1259,7 +1236,6 @@ async function handleGroupParticipantUpdate(sock, update) {
     }
 }
 
-// Instead, export the handlers along with handleMessages
 module.exports = {
     handleMessages,
     handleGroupParticipantUpdate,
