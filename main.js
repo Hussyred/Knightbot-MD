@@ -142,7 +142,7 @@ const { anticallCommand, readState: readAnticallState } = require('./commands/an
 const { pmblockerCommand, readState: readPmBlockerState } = require('./commands/pmblocker');
 const settingsCommand = require('./commands/settings');
 const soraCommand = require('./commands/sora');
-const { afkCommand, removeAfkCommand, getAfkSticker } = require('./commands/afk');
+const { afkCommand, removeAfkCommand, checkAndSendAfkSticker } = require('./commands/afk');
 
 // Global settings
 global.packname = settings.packname;
@@ -273,26 +273,11 @@ async function handleMessages(sock, messageUpdate, printLog) {
             await Antilink(message, sock);
         }
 
-        // Check if any user was tagged (for AFK sticker reply)
+        // Check for AFK sticker when someone is tagged
         if (isGroup && !message.key.fromMe) {
             const mentionedJid = message.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-            
             if (mentionedJid.length > 0) {
-                // Check each mentioned user for a saved sticker
-                for (const taggedUser of mentionedJid) {
-                    const sticker = getAfkSticker(chatId, taggedUser);
-                    if (sticker) {
-                        await sock.sendMessage(chatId, {
-                            sticker: sticker,
-                            contextInfo: {
-                                forwardingScore: 1,
-                                isForwarded: true,
-                                mentionedJid: [taggedUser]
-                            }
-                        });
-                        break; // Only send one sticker per message
-                    }
-                }
+                await checkAndSendAfkSticker(sock, chatId, message, mentionedJid);
             }
         }
 
@@ -385,12 +370,34 @@ async function handleMessages(sock, messageUpdate, printLog) {
         let commandExecuted = false;
 
         switch (true) {
-            case userMessage === '.afk':
-                await afkCommand(sock, chatId, message);
+            case userMessage === '.myjid':
+                const quotedMsgForJid = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                let targetJid = senderId;
+                let targetName = 'You';
+                
+                if (quotedMsgForJid) {
+                    targetJid = message.message.extendedTextMessage.contextInfo.participant || 
+                               message.message.extendedTextMessage.contextInfo.mentionedJid?.[0] || 
+                               senderId;
+                    try {
+                        const contact = await sock.getContactById(targetJid);
+                        targetName = contact.name || contact.pushname || targetJid.split('@')[0];
+                    } catch(e) {
+                        targetName = targetJid.split('@')[0];
+                    }
+                }
+                
+                await sock.sendMessage(chatId, {
+                    text: `📱 *For ${targetName}:*\n\nTo save a sticker for this person:\n1. Reply to a sticker\n2. Type .afk @${targetName}\n\nOr mention them in the command: .afk @${targetName}`
+                }, { quoted: message });
                 commandExecuted = true;
                 break;
-            case userMessage === '.removeafk':
-                await removeAfkCommand(sock, chatId, message);
+            case userMessage.startsWith('.afk'):
+                await afkCommand(sock, chatId, message, senderId, isSenderAdmin);
+                commandExecuted = true;
+                break;
+            case userMessage.startsWith('.removeafk'):
+                await removeAfkCommand(sock, chatId, message, senderId, isSenderAdmin);
                 commandExecuted = true;
                 break;
             case userMessage === '.simage': {
