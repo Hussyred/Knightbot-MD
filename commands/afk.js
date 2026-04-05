@@ -10,7 +10,6 @@ if (!fs.existsSync(AFK_DIR)) {
     fs.mkdirSync(AFK_DIR, { recursive: true });
 }
 
-// Load AFK data
 function loadAfkData() {
     try {
         if (!fs.existsSync(AFK_DATA_FILE)) return {};
@@ -20,7 +19,6 @@ function loadAfkData() {
     }
 }
 
-// Save AFK data
 function saveAfkData(data) {
     try {
         fs.writeFileSync(AFK_DATA_FILE, JSON.stringify(data, null, 2));
@@ -29,7 +27,6 @@ function saveAfkData(data) {
     }
 }
 
-// Download sticker from message
 async function downloadSticker(message, messageId) {
     try {
         const stickerMsg = message.message?.stickerMessage || 
@@ -52,155 +49,127 @@ async function downloadSticker(message, messageId) {
     }
 }
 
-// Get phone number from JID (remove @s.whatsapp.net or @lid)
-function getPhoneNumber(jid) {
-    if (!jid) return null;
-    // Remove @s.whatsapp.net or @lid
-    let phone = jid.split('@')[0];
-    // Remove any non-digit characters
-    phone = phone.replace(/[^0-9]/g, '');
-    return phone;
+// Get the real JID/LID of a user from a message
+async function getUserJid(sock, identifier, chatId) {
+    // If it's already a JID/LID format
+    if (identifier.includes('@')) {
+        return identifier;
+    }
+    
+    // Try to find user in group by phone number
+    if (chatId.endsWith('@g.us')) {
+        try {
+            const groupMetadata = await sock.groupMetadata(chatId);
+            for (const participant of groupMetadata.participants) {
+                if (participant.id.includes(identifier)) {
+                    return participant.id;
+                }
+            }
+        } catch (e) {}
+    }
+    
+    // Return as phone number JID
+    return identifier + '@s.whatsapp.net';
 }
 
 async function afkCommand(sock, chatId, message, senderId, isSenderAdmin) {
     try {
-        // Check if replying to a message
+        const commandText = message.message?.conversation || message.message?.extendedTextMessage?.text || '';
+        console.log(`[AFK] Command text: "${commandText}"`);
+        
+        // Extract phone number from command
+        const phoneMatch = commandText.match(/\d{10,15}/);
+        let targetUser = null;
+        let targetIdentifier = null;
+        
+        // Check mentionedJid first (most reliable)
+        const mentionedJid = message.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+        if (mentionedJid.length > 0) {
+            targetUser = mentionedJid[0];
+            targetIdentifier = targetUser;
+            console.log(`[AFK] Target from mention: ${targetUser}`);
+        } 
+        // If no mention but has phone number
+        else if (phoneMatch) {
+            targetIdentifier = phoneMatch[0];
+            targetUser = await getUserJid(sock, targetIdentifier, chatId);
+            console.log(`[AFK] Target from phone: ${targetIdentifier} -> ${targetUser}`);
+        }
+        
+        // Get the quoted sticker
         const quotedMsg = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
         
         if (!quotedMsg) {
             await sock.sendMessage(chatId, {
-                text: `*AFK STICKER SETUP*\n\nHow to use:\n1. Reply to a STICKER\n2. Type .afk\n\nTo save sticker for someone else:\n.afk @username\n\nTo remove your sticker:\n.removeafk`
+                text: `*AFK STICKER SETUP*\n\n1. Reply to a STICKER\n2. Type .afk\n\nTo save for someone else:\n- Mention them in the command: .afk @user\n- Or use their number: .afk 2348023810565`
             }, { quoted: message });
             return;
         }
         
-        // Check if quoted message is a sticker
         const isSticker = quotedMsg.stickerMessage || 
                          quotedMsg.message?.stickerMessage ||
                          (quotedMsg.imageMessage?.mimetype === 'image/webp');
         
         if (!isSticker) {
-            await sock.sendMessage(chatId, {
-                text: '❌ Please reply to a STICKER, not a text or image.'
-            }, { quoted: message });
+            await sock.sendMessage(chatId, { text: '❌ Reply to a STICKER.' }, { quoted: message });
             return;
         }
         
-        // Download the sticker
         const messageId = message.key.id;
         const stickerPath = await downloadSticker({ message: { stickerMessage: quotedMsg.stickerMessage || quotedMsg.message?.stickerMessage } }, messageId);
         
         if (!stickerPath) {
-            await sock.sendMessage(chatId, {
-                text: '❌ Failed to download sticker. Please try again.'
-            }, { quoted: message });
+            await sock.sendMessage(chatId, { text: '❌ Failed to download sticker.' }, { quoted: message });
             return;
         }
         
-        // Check if user mentioned someone
-        const mentionedJid = message.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-        let targetUser = null;
-        
-        if (mentionedJid.length > 0) {
-            targetUser = mentionedJid[0];
-        } else {
-            // Check for @number in text
-            const text = message.message?.conversation || message.message?.extendedTextMessage?.text || '';
-            const mentionMatch = text.match(/@(\d+)/);
-            if (mentionMatch) {
-                targetUser = mentionMatch[1] + '@s.whatsapp.net';
-            }
-        }
-        
-        // If no target, save for the sender
-        if (!targetUser) {
-            targetUser = senderId;
-        }
-        
-        const targetPhone = getPhoneNumber(targetUser);
-        if (!targetPhone) {
-            await sock.sendMessage(chatId, {
-                text: '❌ Could not identify user.'
-            }, { quoted: message });
-            return;
-        }
-        
-        // Save sticker mapping
         const afkData = loadAfkData();
         if (!afkData[chatId]) afkData[chatId] = {};
-        afkData[chatId][targetUser] = stickerPath;
-        saveAfkData(afkData);
         
-        const isSelf = targetUser === senderId;
-        const messageText = isSelf 
-            ? `✅ Sticker saved for you!\n\nWhen someone tags you, I will send this sticker.`
-            : `✅ Sticker saved for @${targetPhone}!\n\nWhen someone tags them, I will send this sticker.`;
-        
-        await sock.sendMessage(chatId, {
-            text: messageText,
-            mentions: [targetUser]
-        }, { quoted: message });
+        if (targetUser) {
+            afkData[chatId][targetUser] = stickerPath;
+            saveAfkData(afkData);
+            const displayId = targetUser.split('@')[0];
+            await sock.sendMessage(chatId, {
+                text: `✅ Sticker saved for @${displayId}!`,
+                mentions: [targetUser]
+            }, { quoted: message });
+        } else {
+            afkData[chatId][senderId] = stickerPath;
+            saveAfkData(afkData);
+            await sock.sendMessage(chatId, {
+                text: `✅ Sticker saved for you!`
+            }, { quoted: message });
+        }
         
     } catch (error) {
         console.error('Error in afk command:', error);
-        await sock.sendMessage(chatId, {
-            text: '❌ Error saving sticker. Make sure you replied to a valid sticker.'
-        }, { quoted: message });
+        await sock.sendMessage(chatId, { text: '❌ Error saving sticker.' }, { quoted: message });
     }
 }
 
 async function removeAfkCommand(sock, chatId, message, senderId, isSenderAdmin) {
     try {
         const mentionedJid = message.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-        let targetUser = null;
-        
-        if (mentionedJid.length > 0) {
-            targetUser = mentionedJid[0];
-        } else {
-            const text = message.message?.conversation || message.message?.extendedTextMessage?.text || '';
-            const mentionMatch = text.match(/@(\d+)/);
-            if (mentionMatch) {
-                targetUser = mentionMatch[1] + '@s.whatsapp.net';
-            }
-        }
-        
-        if (!targetUser) {
-            targetUser = senderId;
-        }
+        let targetUser = mentionedJid[0] || senderId;
         
         const afkData = loadAfkData();
         
         if (afkData[chatId] && afkData[chatId][targetUser]) {
-            // Delete sticker file
             const stickerPath = afkData[chatId][targetUser];
-            if (fs.existsSync(stickerPath)) {
-                fs.unlinkSync(stickerPath);
-            }
-            
+            if (fs.existsSync(stickerPath)) fs.unlinkSync(stickerPath);
             delete afkData[chatId][targetUser];
             saveAfkData(afkData);
-            
-            const targetPhone = getPhoneNumber(targetUser);
-            await sock.sendMessage(chatId, {
-                text: `✅ Removed sticker for @${targetPhone}`,
-                mentions: [targetUser]
-            }, { quoted: message });
+            await sock.sendMessage(chatId, { text: `✅ Sticker removed.` }, { quoted: message });
         } else {
-            const targetPhone = getPhoneNumber(targetUser);
-            await sock.sendMessage(chatId, {
-                text: `❌ No sticker found for @${targetPhone}`,
-                mentions: [targetUser]
-            }, { quoted: message });
+            await sock.sendMessage(chatId, { text: `❌ No sticker found.` }, { quoted: message });
         }
     } catch (error) {
         console.error('Error in removeafk command:', error);
-        await sock.sendMessage(chatId, {
-            text: '❌ Error removing sticker.'
-        }, { quoted: message });
+        await sock.sendMessage(chatId, { text: '❌ Error removing sticker.' }, { quoted: message });
     }
 }
 
-// Function to check and send AFK sticker when user is tagged
 async function checkAndSendAfkSticker(sock, chatId, message, mentionedJid) {
     try {
         if (!mentionedJid || mentionedJid.length === 0) return;
@@ -214,9 +183,9 @@ async function checkAndSendAfkSticker(sock, chatId, message, mentionedJid) {
                 if (fs.existsSync(stickerPath)) {
                     await sock.sendMessage(chatId, {
                         sticker: { url: stickerPath }
-                    });
+                    }, { quoted: message });
                     console.log(`[AFK] Sent sticker for ${taggedUser}`);
-                    break; // Only send one sticker per message
+                    break;
                 }
             }
         }
