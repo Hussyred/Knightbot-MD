@@ -143,6 +143,7 @@ const { pmblockerCommand, readState: readPmBlockerState } = require('./commands/
 const settingsCommand = require('./commands/settings');
 const soraCommand = require('./commands/sora');
 const { afkCommand, removeAfkCommand, checkAndSendAfkSticker } = require('./commands/afk');
+const { silentCommand, checkAndDeleteSilent } = require('./commands/silent');
 
 // Global settings
 global.packname = settings.packname;
@@ -157,7 +158,7 @@ const channelInfo = {
         isForwarded: true,
         forwardedNewsletterMessageInfo: {
             newsletterJid: '120363161513685998@newsletter',
-            newsletterName: 'KnightBot MD',
+            newsletterName: '𝑯𝒖𝒔𝒂𝒊𝒏 𝑩𝒐𝒕',
             serverMessageId: -1
         }
     }
@@ -273,6 +274,11 @@ async function handleMessages(sock, messageUpdate, printLog) {
             await Antilink(message, sock);
         }
 
+        // Check for silent mode (delete messages from muted users)
+        if (isGroup && !message.key.fromMe) {
+            await checkAndDeleteSilent(sock, chatId, message, senderId);
+        }
+
         // Check for AFK sticker when someone is tagged
         if (isGroup && !message.key.fromMe) {
             const mentionedJid = message.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
@@ -318,7 +324,7 @@ async function handleMessages(sock, messageUpdate, printLog) {
         }
 
         // List of admin commands
-        const adminCommands = ['.mute', '.unmute', '.ban', '.unban', '.promote', '.demote', '.kick', '.tagall', '.tagnotadmin', '.hidetag', '.antilink', '.antitag', '.setgdesc', '.setgname', '.setgpp'];
+        const adminCommands = ['.mute', '.unmute', '.ban', '.unban', '.promote', '.demote', '.kick', '.tagall', '.tagnotadmin', '.hidetag', '.antilink', '.antitag', '.setgdesc', '.setgname', '.setgpp', '.silent'];
         const isAdminCommand = adminCommands.some(cmd => userMessage.startsWith(cmd));
 
         // List of owner commands
@@ -345,7 +351,8 @@ async function handleMessages(sock, messageUpdate, printLog) {
                 userMessage.startsWith('.ban') ||
                 userMessage.startsWith('.unban') ||
                 userMessage.startsWith('.promote') ||
-                userMessage.startsWith('.demote')
+                userMessage.startsWith('.demote') ||
+                userMessage.startsWith('.silent')
             ) {
                 if (!isSenderAdmin && !message.key.fromMe) {
                     await sock.sendMessage(chatId, {
@@ -370,6 +377,10 @@ async function handleMessages(sock, messageUpdate, printLog) {
         let commandExecuted = false;
 
         switch (true) {
+            case userMessage.startsWith('.silent'):
+                await silentCommand(sock, chatId, message, senderId, isSenderAdmin);
+                commandExecuted = true;
+                break;
             case userMessage === '.myjid':
                 const quotedMsgForJid = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
                 let targetJid = senderId;
