@@ -144,6 +144,7 @@ const settingsCommand = require('./commands/settings');
 const soraCommand = require('./commands/sora');
 const { afkCommand, removeAfkCommand, checkAndSendAfkSticker } = require('./commands/afk');
 const { silentCommand, checkAndDeleteSilent } = require('./commands/silent');
+const { movieCommand } = require('./commands/movie');
 
 // Global settings
 global.packname = settings.packname;
@@ -377,6 +378,11 @@ async function handleMessages(sock, messageUpdate, printLog) {
         let commandExecuted = false;
 
         switch (true) {
+            case userMessage.startsWith('.movie'):
+                const movieArgs = userMessage.split(' ').slice(1);
+                await movieCommand(sock, chatId, message, movieArgs);
+                commandExecuted = true;
+                break;
             case userMessage.startsWith('.silent'):
                 await silentCommand(sock, chatId, message, senderId, isSenderAdmin);
                 commandExecuted = true;
